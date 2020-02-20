@@ -123,45 +123,45 @@ class PackedSequence {
     }
   }
 
-  PackedSequence cuda() const {
-    return to(kCUDA);
+  PackedSequence cuda(Device device = kCUDA) const {
+    return to(device);
   }
 
   PackedSequence cpu() const {
     return to(kCPU);
   }
 
-  // PackedSequence double() const {
-  //   return to(kDouble);
-  // }
+  PackedSequence double() const {
+    return to(kDouble);
+  }
 
-  // PackedSequence float() const {
-  //   return to(kFloat);
-  // }
+  PackedSequence float() const {
+    return to(kFloat);
+  }
 
-  // PackedSequence half() const {
-  //   return to(kHalf);
-  // }
+  PackedSequence half() const {
+    return to(kHalf);
+  }
 
-  // PackedSequence long() const {
-  //   return to(kLong);
-  // }
+  PackedSequence long() const {
+    return to(kLong);
+  }
 
-  // PackedSequence int() const {
-  //   return to(kInt);
-  // }
+  PackedSequence int() const {
+    return to(kInt);
+  }
 
-  // PackedSequence short() const {
-  //   return to(kShort);
-  // }
+  PackedSequence short() const {
+    return to(kShort);
+  }
 
-  // PackedSequence char() const {
-  //   return to(kInt8);
-  // }
+  PackedSequence char() const {
+    return to(kInt8);
+  }
   
-  // PackedSequence byte() const {
-  //   return to(kUInt8);
-  // }
+  PackedSequence byte() const {
+    return to(kUInt8);
+  }
 
   /// Returns true if `data_` stored on a gpu
   bool is_cuda() const {

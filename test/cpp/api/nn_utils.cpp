@@ -9,6 +9,8 @@
 
 using namespace torch::nn;
 
+namespace rnn_utils = torch::nn::utils::rnn;
+
 struct NNUtilsTest : torch::test::SeedingFixture {};
 
 torch::Tensor PadSequence_pad(const torch::Tensor& tensor, int64_t length) {
@@ -256,6 +258,60 @@ TEST_F(NNUtilsTest, ConvertParameters) {
   }
 }
 
+int64_t PackedSequenceTest_batch_size = 5;
+int64_t PackedSequenceTest_max_length = 6;
+
+/*
+    def _ordered_sequence(self, tensor_type):
+        """Create ordered list of random sequences"""
+        seqs = [tensor_type(random.randint(1, self.max_length))
+                for _ in range(self.batch_size)]
+        seqs = [s.random_(-128, 128) for s in seqs]
+        ordered = sorted(seqs, key=len, reverse=True)
+        return ordered
+*/
+std::vector<Tensor> PackedSequenceTest_ordered_sequence(torch::ScalarType tensor_type) {
+  std::vector<Tensor> seqs;
+  seqs.reserve(PackedSequenceTest_batch_size);
+  for (int64_t i = 0; i < PackedSequenceTest_batch_size, i++) {
+    seqs.emplace_back(torch::empty({
+      torch::randint(1, PackedSequenceTest_max_length, {1}).item<int64_t>()
+    }, tensor_type));
+  }
+  for (auto& s : seqs) {
+    s.random_(-128, 128);
+  }
+  sort(
+    seqs.begin(),
+    seqs.end(),
+    [&](const Tensor& t1, const Tensor& t2) {
+    return t1.size(0) > t2.size(0);
+  });
+  for (const auto& s : seqs) {
+    std::cout << s << std::endl; // yf225 TODO: DEBUG: this should be descending order
+  }
+  return seqs;
+}
+
+/*
+def _padded_sequence(self, tensor_type):
+        """Create Tensor of random padded sequences"""
+        ordered = self._ordered_sequence(tensor_type)
+        lengths = list(map(len, ordered))
+        padded_tensor = rnn_utils.pad_sequence(ordered)
+        return padded_tensor, lengths
+*/
+std::tuple<Tensor, Tensor> PackedSequenceTest_padded_sequence(torch::ScalarType tensor_type) {
+  // Create Tensor of random padded sequences
+  auto ordered = PackedSequenceTest_ordered_sequence(tensor_type);
+  auto lengths = torch::empty({ordered.size()}, torch::kInt64);
+  for (int64_t i = 0; i < ordered.size(); i++) {
+    lengths[i] = ordered[i].size(0);
+  }
+  auto padded_tensor = rnn_utils::pad_sequence(ordered);
+  return std::make_tuple(padded_tensor, lengths);
+}
+
 /*
 class PackedSequenceTest(TestCase):
 
@@ -276,22 +332,9 @@ class PackedSequenceTest(TestCase):
         super(PackedSequenceTest, self).__init__(*args, **kwargs)
         self.batch_size = 5
         self.max_length = 6
+*/
 
-    def _ordered_sequence(self, tensor_type):
-        """Create ordered list of random sequences"""
-        seqs = [tensor_type(random.randint(1, self.max_length))
-                for _ in range(self.batch_size)]
-        seqs = [s.random_(-128, 128) for s in seqs]
-        ordered = sorted(seqs, key=len, reverse=True)
-        return ordered
-
-    def _padded_sequence(self, tensor_type):
-        """Create Tensor of random padded sequences"""
-        ordered = self._ordered_sequence(tensor_type)
-        lengths = list(map(len, ordered))
-        padded_tensor = rnn_utils.pad_sequence(ordered)
-        return padded_tensor, lengths
-
+/*
     def test_type_casts(self):
         """Test type casting of `PackedSequence` against type casting of tensor"""
         for _, (input_type, _) in self._type_by_name.items():
@@ -304,7 +347,51 @@ class PackedSequenceTest(TestCase):
                     masked = getattr(packed, cast_str)()
                     unpacked, lengths_out = rnn_utils.pad_packed_sequence(masked)
                     self.assertEqual(unpacked.type(), expected_type_str)
+*/
+TEST_F(PackedSequenceTest, TypeCasts) {
+  typedef void (*CastFn)(void); // function pointer type
+  typedef std::unordered_map<torch::ScalarType, CastFn> ScalarTypeToCastFnMap;
 
+  // Test type casting of `PackedSequence` against type casting of tensor
+  ScalarTypeToCastFnMap map = {
+    {torch::kDouble, &rnn_utils::PackedSequence::double},
+    {torch::kFloat, &rnn_utils::PackedSequence::float},
+    {torch::kLong, &rnn_utils::PackedSequence::long},
+    {torch::kInt, &rnn_utils::PackedSequence::int},
+    {torch::kShort, &rnn_utils::PackedSequence::short},
+    {torch::kChar, &rnn_utils::PackedSequence::char},
+    {torch::kByte, &rnn_utils::PackedSequence::byte},
+  }
+  for (const auto& input_item : map) {
+    torch::ScalarType input_type = input_item->first;
+    for (const auto& expected_item : map) {
+      torch::ScalarType expected_type = expected_item->first;
+      CastFn cast_fn = expected_item->second;
+      for (bool enforce_sorted : {true, false}) {
+        Tensor padded, lengths;
+        std::tie(padded, lengths) = PackedSequenceTest_padded_sequence(input_type);
+        PackedSequence packed = rnn_utils::pack_padded_sequence(
+          padded, lengths, /*batch_first=*/false, /*enforce_sorted=*/enforce_sorted);
+        // Apply cast to `PackedSequence` instance and unpack
+        Tensor masked = packed.*cast_fn();
+        Tensor unpacked, lengths_out;
+        std::tie(unpacked, lengths_out) = rnn_utils::pad_packed_sequence(masked);
+        ASSERT_EQ(unpacked.dtype(), expected_type);
+      }
+    }
+  }
+}
+
+TEST_F(PackedSequenceTest, WrongOrder) {
+  auto a = torch::ones({25, 300});
+  auto b = torch::ones({22, 300});
+  auto b_a = rnn_utils::pad_sequence({b, a});
+  ASSERT_THROW(
+    rnn_utils::pack_padded_sequence(
+      b_a, torch::tensor({22, 25}), /*batch_first=*/false, /*enforce_sorted=*/true),
+    c10::Error);
+}
+/*
     def test_wrong_order(self):
         a = torch.ones(25, 300)
         b = torch.ones(22, 300)
@@ -312,7 +399,9 @@ class PackedSequenceTest(TestCase):
         self.assertRaises(
             RuntimeError,
             lambda: rnn_utils.pack_padded_sequence(b_a, [22, 25], enforce_sorted=True))
+*/
 
+/*
     def test_total_length(self):
         padded, lengths = self._padded_sequence(torch.FloatTensor)
         max_length = max(lengths)
@@ -345,7 +434,56 @@ class PackedSequenceTest(TestCase):
                     extra_pad = no_extra_pad.new_zeros(total_length_delta, self.batch_size)
                     ref_output = torch.cat([no_extra_pad, extra_pad], 0)
                 self.assertEqual(unpacked, ref_output)
+*/
+TEST_F(PackedSequenceTest, TotalLength) {
+  Tensor padded, lengths;
+  std::tie(padded, lengths) = PackedSequenceTest_padded_sequence(torch::kFloat);
+  int64_t max_length = torch::max(lengths).item<int64_t>();
+  PackedSequence packed = rnn_utils::pack_padded_sequence(padded, lengths);
 
+  // test ValueError if total_length < max_length
+  for (int64_t total_length : {-1, 0, max_length - 1}) {
+    for (bool batch_first : {true, false}) {
+      auto err_fn = [&]() {
+        rnn_utils::pad_packed_sequence(
+          packed,
+          /*batch_first=*/batch_first,
+          /*padding_value=*/0.0,
+          /*total_length=*/total_length);
+      }
+      ASSERT_THROWS_WITH(err_fn(),
+        "Expected total_length to be at least the length of the longest sequence in input");     
+    }
+  }
+
+  // test that pad_packed_sequence returns results of correct length
+  for (bool batch_first : {true, false}) {
+    Tensor no_extra_pad, ignored;
+    std::tie(no_extra_pad, ignored) = rnn_utils::pad_packed_sequence(
+      packed, /*batch_first=*/batch_first);
+    for (int64_t total_length_delta : {0, 1, 8}) {
+      int64_t total_length = max_length + total_length_delta;
+      Tensor unpacked, lengths_out;
+      std::tie(unpacked, lengths_out) = rnn_utils::pad_packed_sequence(
+        packed, /*batch_first=*/batch_first, /*padding_value=*/0.0, /*total_length=*/total_length);
+      ASSERT_EQ(lengths, lengths_out);
+      ASSERT_EQ(unpacked.size(batch_first ? 1 : 0), total_length);
+      Tensor ref_output, extra_pad;
+      if (total_length_delta == 0) {
+        ref_output = no_extra_pad;
+      } else if (batch_first) {
+        extra_pad = torch::zeros({PackedSequenceTest_batch_size, total_length_delta}, no_extra_pad.options());
+        ref_output = torch::cat({no_extra_pad, extra_pad}, 1);
+      } else {
+        extra_pad = torch::zeros({total_length_delta, PackedSequenceTest_batch_size}, no_extra_pad.options());
+        ref_output = torch::cat({no_extra_pad, extra_pad}, 0);
+      }
+      ASSERT_TRUE(torch::allclose(unpacked, ref_output));
+    }
+  }
+}
+
+/*
     def test_to(self):
         for enforce_sorted in (True, False):
             padded, lengths = self._padded_sequence(torch.IntTensor)
@@ -367,7 +505,47 @@ class PackedSequenceTest(TestCase):
                     self.assertEqual(a, b.to('cpu', dtype=torch.int32))
                     self.assertIs(b, b.to(dtype=torch.int32))
                     self.assertEqual(b.long(), b.to(dtype=torch.int64))
+*/
+void PackedSequenceTest_To_do_test() {
+  for (bool enforce_sorted : {true, false}) {
+    Tensor padded, lengths;
+    std::tie(padded, lengths) = PackedSequenceTest_padded_sequence(torch::kInt);
+    rnn_utils::PackedSequence a = rnn_utils::pack_padded_sequence(
+      padded, lengths, /*batch_first=*/false, /*enforce_sorted=*/enforce_sorted).cpu();
 
+    ASSERT_TRUE(a.is_same(a.to(torch::kCPU)));
+    ASSERT_TRUE(a.is_same(a.cpu()));
+    ASSERT_TRUE(a.is_same(a.to(torch::device(torch::kCPU).dtype(torch::kInt32))));
+    ASSERT_TRUE(torch::allclose(a.long(), a.to(torch::kInt64)));
+
+    if (torch::cuda::is_available()) {
+      for (auto cuda : {
+          torch::device(torch::kCUDA),
+          torch::cuda::device_count() == 1 ?
+            torch::device({torch::kCUDA, 0}) : torch::device({torch::kCUDA, 1})}) {
+
+        auto b = a.cuda(cuda);
+        ASSERT_TRUE(b.is_same(b.to(cuda)));
+        ASSERT_TRUE(b.is_same(b.cuda()));
+        ASSERT_TRUE(torch::allclose(a, b.to(torch::kCPU)));
+        ASSERT_TRUE(torch::allclose(b, a.to(cuda)));
+        ASSERT_TRUE(torch::allclose(a, b.to(torch::device(torch::kCPU).dtype(torch::kInt32))));
+        ASSERT_TRUE(b.is_same(b.to(torch::kInt32)));
+        ASSERT_TRUE(torch::allclose(b.long(), b.to(torch::kInt64)));
+      }
+    }
+  }
+}
+
+TEST_F(PackedSequenceTest, To) {
+  PackedSequenceTest_To_do_test();
+}
+
+TEST_F(PackedSequenceTest, To_CUDA) {
+  PackedSequenceTest_To_do_test();
+}
+
+/*
     def test_to_memory_format(self):
         m = torch.nn.Conv2d(in_channels=16, out_channels=32, kernel_size=2, bias=True)
         m = m.to(memory_format=torch.channels_last)
@@ -375,6 +553,15 @@ class PackedSequenceTest(TestCase):
             if param.dim() == 4:
                 self.assertTrue(param.is_contiguous(memory_format=torch.channels_last))
 */
+TEST_F(PackedSequenceTest, ToMemoryFormat) {
+  auto m = torch::nn::Conv2d(torch::nn::Conv2dOptions(16, 32, 2).bias(true));
+  m = m.to(torch::MemoryFormat::ChannelsLast);
+  for (const auto& param : m.parameters()) {
+    if (param.dim() == 4) {
+      ASSERT_TRUE(param.is_contiguous(torch::MemoryFormat::ChannelsLast));
+    }
+  }          
+}
 
 /*
 def test_pack_sequence(self):
@@ -437,7 +624,80 @@ def test_pack_sequence(self):
                 _compatibility_test(sequences, lengths, batch_first, enforce_sorted)
             _compatibility_test(unsorted_sequences, unsorted_sequences_lengths,
                                 batch_first)
+*/
+TEST_F(NNUtilsTest, PackSequence) {
+  auto _compatibility_test = [&](
+      torch::ArrayRef<Tensor> sequences,
+      Tensor lengths,
+      bool batch_first,
+      bool enforce_sorted = false) {
+    Tensor padded = rnn_utils::pad_sequence(sequences, batch_first);
+    rnn_utils::PackedSequence packed = rnn_utils::pack_sequence(sequences, enforce_sorted);
+    std::tuple<Tensor, Tensor> unpacked = rnn_utils::pad_packed_sequence(packed, batch_first);
+    ASSERT_TRUE(torch::allclose(padded, std::get<0>(unpacked)));
+    rnn_utils::PackedSequence pack_padded = rnn_utils::pack_padded_sequence(
+        padded, lengths, batch_first, enforce_sorted);
 
+    ASSERT_TRUE(torch::allclose(packed.data(), pack_padded.data()));
+    ASSERT_TRUE(torch::allclose(packed.batch_sizes(), pack_padded.batch_sizes()));
+    ASSERT_TRUE(torch::allclose(packed.sorted_indices(), pack_padded.sorted_indices())); // yf225 TODO: does this still work if tensor is undefined?
+    ASSERT_TRUE(torch::allclose(packed.unsorted_indices(), pack_padded.unsorted_indices())); // yf225 TODO: does this still work if tensor is undefined?
+  }
+
+  // single dimensional
+  auto a = torch.tensor({1, 2, 3});
+  auto b = torch.tensor({4, 5});
+  auto c = torch.tensor({6});
+  packed = rnn_utils.pack_sequence([a, b, c], enforce_sorted=False)
+  expected = torch.tensor([1, 4, 6, 2, 5, 3])
+  self.assertEqual(packed.batch_sizes, [3, 2, 1])
+  self.assertEqual(packed.data.data, expected)
+  self.assertEqual(packed.sorted_indices, [0, 1, 2])
+  self.assertEqual(packed.unsorted_indices, [0, 1, 2])
+
+  packed_unsorted = rnn_utils.pack_sequence([b, c, a], enforce_sorted=False)
+  self.assertEqual(packed_unsorted.batch_sizes, [3, 2, 1])
+  self.assertEqual(packed_unsorted.data.data, expected)
+  self.assertEqual(packed_unsorted.sorted_indices, [2, 0, 1])
+  self.assertEqual(packed_unsorted.unsorted_indices, [1, 2, 0])
+
+  # single dimensional, enforce_sorted = True
+  packed_enforce_sorted = rnn_utils.pack_sequence([a, b, c], enforce_sorted=True)
+  self.assertEqual(packed_enforce_sorted.batch_sizes, [3, 2, 1])
+  self.assertEqual(packed_enforce_sorted.data.data, expected)
+  self.assertTrue(packed_enforce_sorted.sorted_indices is None)
+  self.assertTrue(packed_enforce_sorted.unsorted_indices is None)
+
+  with self.assertRaisesRegex(RuntimeError, 'must be sorted in decreasing order'):
+      rnn_utils.pack_sequence([b, c, a], enforce_sorted=True)
+
+  with self.assertRaisesRegex(RuntimeError, 'You can pass `enforce_sorted=False`'):
+      rnn_utils.pack_sequence([b, c, a], enforce_sorted=True)
+
+  # more dimensions
+  maxlen = 9
+  for num_dim in (0, 1, 2, 3):
+      sequences = []
+      lengths = []
+      trailing_dims = [4] * num_dim
+      for i in range(maxlen, 0, -1):
+          seq_len = i * i
+          lengths.append(seq_len)
+          sequences.append(torch.rand(seq_len, 5, *trailing_dims))
+      unsorted_sequences = [s.clone() for s in sequences]
+      random.shuffle(unsorted_sequences)
+      unsorted_sequences_lengths = [t.size(0) for t in unsorted_sequences]
+
+      # compatibility with other utilities
+      for batch_first in (True, False):
+          for enforce_sorted in (True, False):
+              _compatibility_test(sequences, lengths, batch_first, enforce_sorted)
+          _compatibility_test(unsorted_sequences, unsorted_sequences_lengths,
+                              batch_first)
+}
+
+
+/*
 def test_pack_padded_sequence(self):
     def generate_test_case(sorted_lengths, should_shuffle):
         def pad(tensor, length):
